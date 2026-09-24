@@ -425,6 +425,93 @@ class TestAPI(unittest.TestCase):
             c = s[kind]
             self.assertEqual(c["a_leads"] + c["b_leads"] + c["ties"], 1)
 
+    def test_22_judge_disagreement_in_analysis(self):
+        # JA/JB 同向；JA/JC 逆向；JB 与 JC 同向（C3,C4 上）。
+        csv_body = (
+            "选手,评委,项目,分数\n"
+            "C1,JA,P1,8.30\nC2,JA,P1,8.00\nC3,JA,P1,7.90\nC4,JA,P1,7.80\n"
+            "C1,JB,P1,8.30\nC2,JB,P1,8.00\nC3,JB,P1,7.85\nC4,JB,P1,7.75\n"
+            "C1,JC,P1,5.0\nC2,JC,P1,9.5\nC3,JC,P1,7.2\nC4,JC,P1,6.8\n"
+        )
+        r = client.post(
+            f"/api/sessions/{SID}/upload?scope=judge",
+            files={"file": ("s.csv", csv_body.encode("utf-8-sig"), "text/csv")},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        dg = r.json()["judge_disagreement"]
+        self.assertEqual(dg["summary"]["groups"], 3)  # 3 judge pairs, one item
+        by_pair = {(g["judge_a"], g["judge_b"]): g for g in dg["groups"]}
+        g_ajc = by_pair[("JA", "JC")]
+        self.assertTrue(g_ajc["sufficient"])
+        self.assertEqual(g_ajc["common_count"], 4)
+        self.assertEqual(g_ajc["pairs_total"], 6)
+        self.assertEqual(g_ajc["counts"]["discordant"], 1)  # C1 vs C2 reversed
+        self.assertEqual(g_ajc["comparable_pairs"], 6)
+        self.assertAlmostEqual(g_ajc["discordance_rate"], 1 / 6)
+        rev = g_ajc["discordant_pairs"]
+        self.assertEqual(len(rev), 1)
+        self.assertEqual({rev[0]["contestant_a"], rev[0]["contestant_b"]}, {"C1", "C2"})
+        self.assertEqual(rev[0]["judge_a_prefers"], "C1")
+        self.assertEqual(rev[0]["judge_b_prefers"], "C2")
+        g_ajb = by_pair[("JA", "JB")]
+        self.assertEqual(g_ajb["counts"]["concordant"], 6)
+        self.assertEqual(g_ajb["discordance_rate"], 0.0)
+
+        # 与校准范围、裁决无关：切范围、写裁决后原始分歧保持不变。
+        scoped = client.post(f"/api/sessions/{SID}/scope", json={"scope": "judge_item"}).json()
+        self.assertEqual(scoped["judge_disagreement"], dg)
+        target = next(
+            s for b in scoped["contestants"] for ib in b["items"] for s in ib["scores"]
+            if s["judge"] == "JC"
+        )
+        decided = client.patch(
+            f"/api/sessions/{SID}/scores/{target['id']}/decision",
+            json={"use_raw": True, "reason": "分歧面板不应变化"},
+        ).json()
+        self.assertEqual(decided["judge_disagreement"], dg)
+        client.post(f"/api/sessions/{SID}/scope", json={"scope": "judge"})
+        client.post(f"/api/sessions/{SID}/decisions/reset")
+
+    def test_23_judge_disagreement_refreshes_with_merge(self):
+        # 两个评委在 P1 对 A、B 评价相反（逆向 1 对）。
+        csv_before = (
+            "选手,评委,项目,分数\n"
+            "A,J1,P1,8\nB,J1,P1,7\nA,J2,P1,6\nB,J2,P1,9\n"
+        )
+        client.post(
+            f"/api/sessions/{SID}/upload?scope=judge",
+            files={"file": ("b.csv", csv_before.encode("utf-8-sig"), "text/csv")},
+        )
+        before = client.get(f"/api/sessions/{SID}/analysis").json()["judge_disagreement"]
+        self.assertEqual(before["summary"]["counts"]["discordant"], 1)
+
+        # 合并导入：把 J2 对 A 的分数改为 9，A/B 在两位评委处都同向。
+        csv_after = (
+            "选手,评委,项目,分数\n"
+            "A,J1,P1,8\nB,J1,P1,7\nA,J2,P1,9\nB,J2,P1,9\n"
+        )
+        preview = client.post(
+            f"/api/sessions/{SID}/merge/preview?scope=judge",
+            files={"file": ("a.csv", csv_after.encode("utf-8-sig"), "text/csv")},
+        ).json()
+        self.assertEqual(preview["counts"]["changed"], 1)
+        # 预览不落库：分歧尚未变化。
+        still = client.get(f"/api/sessions/{SID}/analysis").json()["judge_disagreement"]
+        self.assertEqual(still["summary"]["counts"]["discordant"], 1)
+
+        confirmed = client.post(
+            f"/api/sessions/{SID}/merge/confirm",
+            json={"records": preview["records"], "basis": preview["basis"], "scope": "judge"},
+        ).json()
+        dg = confirmed["judge_disagreement"]
+        g = dg["groups"][0]
+        self.assertEqual(g["counts"]["discordant"], 0)
+        # J2 给 A、B 同分 → 唯一选手对为单方同分，不计入可比较对数，不给分歧率。
+        self.assertEqual(g["pairs_total"], 1)
+        self.assertEqual(g["counts"]["one_tie"], 1)
+        self.assertEqual(g["comparable_pairs"], 0)
+        self.assertIsNone(g["discordance_rate"])
+
 
 if __name__ == "__main__":
     unittest.main()

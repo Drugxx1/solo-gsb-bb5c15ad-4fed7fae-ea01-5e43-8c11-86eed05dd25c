@@ -31,6 +31,20 @@ SCOPE_LABELS = {
 
 TIE_EPS = 1e-9
 
+# 评委排序分歧：选手对按原始分的四类归类。
+DG_CONCORDANT = "concordant"      # 同向：双方都非同分，且排序方向一致
+DG_DISCORDANT = "discordant"      # 逆向：双方都非同分，但排序方向相反
+DG_ONE_TIE = "one_tie"            # 单方同分：恰有一位评委给两名选手同分
+DG_BOTH_TIE = "both_tie"          # 双方同分：两位评委都给同分
+DG_CATEGORIES = (DG_CONCORDANT, DG_DISCORDANT, DG_ONE_TIE, DG_BOTH_TIE)
+DG_CATEGORY_LABELS = {
+    DG_CONCORDANT: "同向",
+    DG_DISCORDANT: "逆向",
+    DG_ONE_TIE: "单方同分",
+    DG_BOTH_TIE: "双方同分",
+}
+DG_MIN_COMMON = 2  # 共评选手少于该数时样本不足，不给分歧率
+
 
 def robust_params(values: Sequence[float]) -> tuple[float, float, float]:
     """Return (median, raw MAD, MAD scaled by 1.4826)."""
@@ -53,6 +67,139 @@ def competition_rank(pairs: Iterable[tuple[Any, float]]) -> dict[Any, int]:
 
 def _avg(values: Sequence[float]) -> float:
     return sum(values) / len(values)
+
+
+def judge_disagreement(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """按「项目 × 评委对」统计原始分排序分歧。
+
+    纯只读计算，只使用**原始分**，与校准范围及人工裁决无关。对每个项目下
+    共同评过该项目的每一对评委，仅取**两位评委都打过分**的选手（共评选手）：
+
+    - 共评选手少于 2 名时标为「样本不足」，不计算可比较对数与逆向占比；
+    - 枚举全部选手对，按双方原始分差归类为 同向 / 逆向 / 单方同分 / 双方同分；
+    - 仅双方均非同分（同向、逆向）的选手对计入可比较对数，
+      逆向占比 = 逆向对数 / 可比较对数。
+
+    每个分组保留全部逆向选手对的双方原分，供前端展开查看。
+    """
+    # item -> judge -> contestant -> raw score（同一三元组有重复时以首条为准）
+    by_item: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
+    item_order: list[str] = []
+    judge_order: list[str] = []
+    for rec in records:
+        item, judge, contestant = rec["item"], rec["judge"], rec["contestant"]
+        if item not in by_item:
+            item_order.append(item)
+        if judge not in judge_order:
+            judge_order.append(judge)
+        by_item[item][judge].setdefault(contestant, float(rec["score"]))
+
+    groups: list[dict[str, Any]] = []
+    totals = {key: 0 for key in DG_CATEGORIES}
+    totals.update(pairs=0, comparable_pairs=0, discordant_pairs=0)
+    sufficient_groups = 0
+    insufficient_groups = 0
+
+    for item in item_order:
+        judges_here = [j for j in judge_order if j in by_item[item]]
+        contestant_order = list(
+            dict.fromkeys(r["contestant"] for r in records if r["item"] == item)
+        )
+        for ia, judge_a in enumerate(judges_here):
+            scores_a = by_item[item][judge_a]
+            for judge_b in judges_here[ia + 1:]:
+                scores_b = by_item[item][judge_b]
+                # 交集保持选手在记录中的首次出现顺序。
+                common = [c for c in contestant_order if c in scores_a and c in scores_b]
+                counts = {key: 0 for key in DG_CATEGORIES}
+                discordant_pairs: list[dict[str, Any]] = []
+                sufficient = len(common) >= DG_MIN_COMMON
+
+                if sufficient:
+                    for i, ca in enumerate(common):
+                        for cb in common[i + 1:]:
+                            da = scores_a[ca] - scores_a[cb]
+                            db = scores_b[ca] - scores_b[cb]
+                            tie_a = abs(da) <= TIE_EPS
+                            tie_b = abs(db) <= TIE_EPS
+                            if tie_a and tie_b:
+                                category = DG_BOTH_TIE
+                            elif tie_a or tie_b:
+                                category = DG_ONE_TIE
+                            elif (da > 0) == (db > 0):
+                                category = DG_CONCORDANT
+                            else:
+                                category = DG_DISCORDANT
+                                # da 为正时评委甲更看好 ca，db 为负则评委乙更看好 cb。
+                                if da > 0:
+                                    a_pref, b_pref = ca, cb
+                                else:
+                                    a_pref, b_pref = cb, ca
+                                discordant_pairs.append(
+                                    {
+                                        "contestant_a": ca,
+                                        "contestant_b": cb,
+                                        "judge_a_score_of_a": scores_a[ca],
+                                        "judge_a_score_of_b": scores_a[cb],
+                                        "judge_b_score_of_a": scores_b[ca],
+                                        "judge_b_score_of_b": scores_b[cb],
+                                        "judge_a_prefers": a_pref,
+                                        "judge_b_prefers": b_pref,
+                                    }
+                                )
+                            counts[category] += 1
+
+                pairs_total = len(common) * (len(common) - 1) // 2
+                comparable_count = counts[DG_CONCORDANT] + counts[DG_DISCORDANT]
+                group = {
+                    "item": item,
+                    "judge_a": judge_a,
+                    "judge_b": judge_b,
+                    "common_count": len(common),
+                    "sufficient": sufficient,
+                    "pairs_total": pairs_total,
+                    "counts": counts,
+                    "comparable_pairs": comparable_count if sufficient else None,
+                    # 样本不足或可比较对数为 0 时不给逆向占比。
+                    "discordance_rate": (
+                        counts[DG_DISCORDANT] / comparable_count
+                        if sufficient and comparable_count
+                        else None
+                    ),
+                    "discordant_pairs": discordant_pairs,
+                }
+                groups.append(group)
+
+                totals["pairs"] += pairs_total
+                if sufficient:
+                    sufficient_groups += 1
+                    for key in DG_CATEGORIES:
+                        totals[key] += counts[key]
+                    totals["comparable_pairs"] += comparable_count
+                    totals["discordant_pairs"] += counts[DG_DISCORDANT]
+                else:
+                    insufficient_groups += 1
+
+    comparable_total = totals["comparable_pairs"]
+    return {
+        "category_labels": dict(DG_CATEGORY_LABELS),
+        "min_common": DG_MIN_COMMON,
+        "summary": {
+            "groups": len(groups),
+            "sufficient_groups": sufficient_groups,
+            "insufficient_groups": insufficient_groups,
+            "common_contestant_pairs": totals["pairs"],
+            "counts": {key: totals[key] for key in DG_CATEGORIES},
+            "comparable_pairs": comparable_total,
+            "discordant_pairs": totals["discordant_pairs"],
+            "discordance_rate": (
+                totals["discordant_pairs"] / comparable_total
+                if comparable_total
+                else None
+            ),
+        },
+        "groups": groups,
+    }
 
 
 def analyze(
@@ -243,6 +390,8 @@ def analyze(
         "groups": groups,
         "contestants": contestant_blocks,
         "reversals": reversals,
+        # 评委排序分歧：仅基于原始分，与校准范围和裁决无关，随导入/合并实时刷新。
+        "judge_disagreement": judge_disagreement(records),
         "counts": {
             "scores": len(records),
             "contestants": len(contestants),

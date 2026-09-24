@@ -92,6 +92,7 @@ function render() {
   renderGroups();
   renderReversals();
   renderRanks();
+  renderDisagreement();
   initRuleDraft();
   renderDetails();
   renderStability();
@@ -371,6 +372,156 @@ function renderCompare() {
 
 compareASel.addEventListener("change", refreshCompare);
 compareBSel.addEventListener("change", refreshCompare);
+
+// ---------- Judge ranking disagreement (read-only, raw scores only) ----------
+function pctText(rate) {
+  return rate === null || rate === undefined ? "—" : (rate * 100).toFixed(1) + "%";
+}
+
+function renderDisagreement() {
+  const panel = $("#disagreement-panel");
+  if (!panel) return;
+  const dg = analysis.judge_disagreement;
+  if (!dg || dg.summary.groups === 0) {
+    panel.innerHTML = `<p class="no-reversal">当前数据没有任何「项目 × 评委对」分组（至少需要两位评委给同一项目打分）。</p>`;
+    return;
+  }
+  const s = dg.summary;
+
+  const banner = `
+    <div class="dg-banner">
+      共 <b>${s.groups}</b> 个「项目 × 评委对」分组（样本充足 <b>${s.sufficient_groups}</b>、
+      <span class="dg-ins">样本不足 <b>${s.insufficient_groups}</b></span>），
+      共评选手对（含同分对）<b>${s.common_contestant_pairs}</b> 对：
+      <span class="dg-con">同向 <b>${s.counts.concordant}</b></span>、
+      <span class="dg-dis">逆向 <b>${s.counts.discordant}</b></span>、
+      <span class="dg-one">单方同分 <b>${s.counts.one_tie}</b></span>、
+      <span class="dg-both">双方同分 <b>${s.counts.both_tie}</b></span>。
+      可比较对数（双方均非同分）<b>${s.comparable_pairs}</b>，
+      整体逆向占比 <b class="${s.discordance_rate ? "dg-rate" : ""}">${pctText(s.discordance_rate)}</b>
+      <span class="dg-note">（样本不足分组不给分歧率，也不计入整体占比）。</span>
+    </div>`;
+
+  // 样本充足的分组优先，并按逆向占比降序（无分歧率沉底）。
+  const ordered = dg.groups.slice().sort((g1, g2) => {
+    if (g1.sufficient !== g2.sufficient) return g1.sufficient ? -1 : 1;
+    const r1 = g1.discordance_rate, r2 = g2.discordance_rate;
+    if (r1 === null && r2 === null) return 0;
+    if (r1 === null) return 1;
+    if (r2 === null) return -1;
+    return r2 - r1;
+  });
+
+  const head = `
+    <tr>
+      <th>项目</th><th>评委对</th><th class="num">共评<br>选手数</th>
+      <th class="num">选手对<br>总数</th><th class="num">同向</th><th class="num">逆向</th>
+      <th class="num">单方<br>同分</th><th class="num">双方<br>同分</th>
+      <th class="num">可比较<br>对数</th><th class="num">逆向占比</th><th>明细</th>
+    </tr>`;
+
+  // 某位评委一列：给 X / 给 Y 原分，以及该评委更看好谁（▲ 标注在更高分一侧）。
+  const judgeCells = (scoreOfX, scoreOfY, prefIsX) => `
+    <td class="num">${fmt(scoreOfX)}${prefIsX ? ' <small class="dg-mark">▲</small>' : ""}</td>
+    <td class="num">${fmt(scoreOfY)}${prefIsX ? "" : ' <small class="dg-mark">▲</small>'}</td>
+    <td><span class="${prefIsX ? "dg-pref-a" : "dg-pref-b"}">更看好 ${esc(prefIsX ? "X" : "Y")}</span></td>`;
+
+  const rows = ordered.map((g, idx) => {
+    const pair = `${esc(g.judge_a)}<span class="dg-vs"> × </span>${esc(g.judge_b)}`;
+    const detailHead = `
+      <tr>
+        <th colspan="3">选手 X</th><th colspan="3">选手 Y</th>
+        <th colspan="3">${esc(g.judge_a)} 的原分</th>
+        <th colspan="3">${esc(g.judge_b)} 的原分</th>
+      </tr>
+      <tr>
+        <th colspan="3"></th><th colspan="3"></th>
+        <th class="num">给 X</th><th class="num">给 Y</th><th>更看好</th>
+        <th class="num">给 X</th><th class="num">给 Y</th><th>更看好</th>
+      </tr>`;
+    const detailRows = g.discordant_pairs.map((p) => `
+      <tr>
+        <td colspan="3">${esc(p.contestant_a)}</td>
+        <td colspan="3">${esc(p.contestant_b)}</td>
+        ${judgeCells(p.judge_a_score_of_a, p.judge_a_score_of_b, p.judge_a_prefers === p.contestant_a)}
+        ${judgeCells(p.judge_b_score_of_a, p.judge_b_score_of_b, p.judge_b_prefers === p.contestant_a)}
+      </tr>`).join("");
+    const detailRow = `
+      <tr class="dg-detail-row" data-detail="${idx}" hidden>
+        <td colspan="11">
+          <div class="table-wrap"><table class="dg-detail-table">
+            ${detailHead}${detailRows}
+          </table></div>
+        </td>
+      </tr>`;
+
+    if (!g.sufficient) {
+      return `
+      <tr class="dg-row dg-insufficient" data-row="${idx}">
+        <td>${esc(g.item)}</td><td>${pair}</td>
+        <td class="num">${g.common_count}</td>
+        <td class="num">—</td><td class="num">—</td><td class="num">—</td>
+        <td class="num">—</td><td class="num">—</td><td class="num">—</td>
+        <td><span class="dg-ins-badge">样本不足</span></td>
+        <td><span class="dg-no-detail">共评选手少于 ${dg.min_common} 名</span></td>
+      </tr>`;
+    }
+
+    const rateCell = g.discordance_rate === null
+      ? `<span class="delta-flat">无可比较对</span>`
+      : `<b class="${g.discordance_rate > 0 ? "dg-rate" : "delta-flat"}">${pctText(g.discordance_rate)}</b>`;
+    const expandable = g.discordant_pairs.length > 0;
+    return `
+      <tr class="dg-row${expandable ? " dg-expandable" : ""}" data-row="${idx}">
+        <td>${esc(g.item)}</td><td>${pair}</td>
+        <td class="num">${g.common_count}</td>
+        <td class="num">${g.pairs_total}</td>
+        <td class="num">${g.counts.concordant}</td>
+        <td class="num"><b class="${g.counts.discordant ? "dg-rate" : ""}">${g.counts.discordant}</b></td>
+        <td class="num">${g.counts.one_tie}</td>
+        <td class="num">${g.counts.both_tie}</td>
+        <td class="num">${g.comparable_pairs}</td>
+        <td class="num">${rateCell}</td>
+        <td>${expandable
+          ? `<span class="dg-toggle" data-toggle="${idx}">查看 ${g.counts.discordant} 个逆向选手对 ▾</span>`
+          : '<span class="dg-no-detail">无逆向选手对</span>'}</td>
+      </tr>
+      ${detailRow}`;
+  }).join("");
+
+  panel.innerHTML = banner + `
+    <div class="table-wrap dg-table-wrap"><table>${head}${rows}</table></div>
+    <p class="hint dg-foot">
+      所有数字仅由<b>原始分</b>计算，切换校准范围、逐项裁决或规则批处理都不会改变本面板；
+      「选手对总数」= 共评选手两两组合数，其中同向 + 逆向 = 可比较对数（单方/双方同分不参与分歧率）。
+    </p>`;
+
+  panel.querySelectorAll(".dg-toggle").forEach((toggle) => {
+    toggle.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const idx = toggle.dataset.toggle;
+      const detail = panel.querySelector(`.dg-detail-row[data-detail="${idx}"]`);
+      const n = toggle.textContent.match(/\d+/)[0];
+      if (detail.hasAttribute("hidden")) {
+        detail.removeAttribute("hidden");
+        toggle.textContent = `收起 ${n} 个逆向选手对 ▴`;
+      } else {
+        detail.setAttribute("hidden", "");
+        toggle.textContent = `查看 ${n} 个逆向选手对 ▾`;
+      }
+    });
+  });
+  // 点击整行同样可以展开/收起（仅存在逆向选手对的行）。
+  panel.querySelectorAll(".dg-expandable").forEach((row) => {
+    row.addEventListener("click", () => {
+      panel.querySelector(`.dg-toggle[data-toggle="${row.dataset.row}"]`)?.click();
+    });
+  });
+  // 展开区域内的点击不应冒泡触发行收起。
+  panel.querySelectorAll(".dg-detail-row").forEach((detail) => {
+    detail.addEventListener("click", (ev) => ev.stopPropagation());
+  });
+}
 
 function renderGroups() {
   const byItem = analysis.scope === "judge_item";

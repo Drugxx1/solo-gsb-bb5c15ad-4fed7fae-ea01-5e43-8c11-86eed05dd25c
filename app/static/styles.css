@@ -420,3 +420,49 @@ tr.mg-row.unchanged:hover td { background: #fafbff; }
 .merge-actions { margin-top: 12px; }
 .merge-actions .btn-ghost-card { color: var(--muted); }
 .merge-actions .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ---------- Judge ranking disagreement ---------- */
+.disagreement-panel .dg-banner {
+  background: #f5f8ff;
+  border: 1px solid #dbe6ff;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #33455f;
+  margin-bottom: 10px;
+}
+.dg-banner .dg-note { color: var(--muted); }
+.dg-con { color: var(--green); }
+.dg-dis, .dg-rate { color: var(--red); }
+.dg-one { color: var(--amber); }
+.dg-both { color: var(--muted); }
+.dg-ins { color: var(--muted); }
+.dg-table-wrap { margin-bottom: 6px; }
+.dg-vs { color: var(--muted); }
+tr.dg-expandable { cursor: pointer; }
+tr.dg-insufficient td { background: #f7f8fa; color: var(--muted); }
+.dg-ins-badge {
+  display: inline-block;
+  background: #eef1f5;
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dg-toggle {
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.dg-toggle:hover { text-decoration: underline; }
+.dg-no-detail { color: var(--muted); font-size: 12px; white-space: nowrap; }
+tr.dg-detail-row td { background: #fbfcfe; padding: 10px 14px; }
+.dg-detail-table { max-width: 880px; }
+.dg-detail-table th[colspan] { text-align: center; }
+.dg-mark { color: var(--red); font-weight: 700; }
+.dg-pref-a { color: var(--green); font-size: 12px; white-space: nowrap; }
+.dg-pref-b { color: var(--red); font-size: 12px; white-space: nowrap; }
+.dg-foot { margin-top: 8px; margin-bottom: 0; }
