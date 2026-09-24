@@ -31,6 +31,26 @@ SCOPE_LABELS = {
 
 TIE_EPS = 1e-9
 
+# 评委排序分歧的四类选手对
+DISAGREEMENT_CONCORDANT = "concordant"  # 同向：双方均非同分且偏好一致
+DISAGREEMENT_REVERSED = "reversed"      # 逆向：双方均非同分但偏好相反
+DISAGREEMENT_ONE_TIE = "one_tie"        # 单方同分：仅一方给两名选手同分
+DISAGREEMENT_BOTH_TIE = "both_tie"      # 双方同分：两方都给两名选手同分
+DISAGREEMENT_KIND_LABELS = {
+    DISAGREEMENT_CONCORDANT: "同向",
+    DISAGREEMENT_REVERSED: "逆向",
+    DISAGREEMENT_ONE_TIE: "单方同分",
+    DISAGREEMENT_BOTH_TIE: "双方同分",
+}
+# 共评选手少于该数时无法枚举任何选手对，标记「样本不足」且不计算分歧率。
+DISAGREEMENT_MIN_SHARED = 2
+DISAGREEMENT_KINDS = (
+    DISAGREEMENT_CONCORDANT,
+    DISAGREEMENT_REVERSED,
+    DISAGREEMENT_ONE_TIE,
+    DISAGREEMENT_BOTH_TIE,
+)
+
 
 def robust_params(values: Sequence[float]) -> tuple[float, float, float]:
     """Return (median, raw MAD, MAD scaled by 1.4826)."""
@@ -53,6 +73,146 @@ def competition_rank(pairs: Iterable[tuple[Any, float]]) -> dict[Any, int]:
 
 def _avg(values: Sequence[float]) -> float:
     return sum(values) / len(values)
+
+
+def judge_disagreement(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """评委排序分歧：按「项目 × 评委对」枚举共评选手对并依原始分归类。
+
+    对每个项目，取一对评委都在该项目打过分的选手（共评选手），枚举其中全部
+    选手对，按两位评委各自给出的**原始分**（与校准范围、人工裁决无关）归入四类：
+
+    - 同向（concordant）：双方都非同分，且对哪名选手更强的判断一致；
+    - 逆向（reversed）：双方都非同分，但偏好相反；
+    - 单方同分（one_tie）：仅一方给两名选手同分；
+    - 双方同分（both_tie）：两方都给两名选手同分。
+
+    某评委对在某项目的共评选手少于 2 名时标为「样本不足」，不给分歧率。
+    分歧率（逆向占比）= 逆向对数 / 可比较对数，其中可比较对仅统计双方均
+    非同分的选手对（同向 + 逆向）；同分对不计入分母。
+    """
+    # 保留首次出现顺序：评委、项目、选手。
+    judges: list[str] = list(dict.fromkeys(r["judge"] for r in records))
+    items: list[str] = list(dict.fromkeys(r["item"] for r in records))
+    contestants_order: dict[str, int] = {}
+    for r in records:
+        if r["contestant"] not in contestants_order:
+            contestants_order[r["contestant"]] = len(contestants_order)
+
+    # (judge_a, judge_b, item) -> {contestant: (score_a, score_b)}
+    scores: dict[tuple[str, str, str], dict[str, tuple[float, float]]] = defaultdict(dict)
+    # (item, judge) -> contestant -> raw score
+    raw_by_ij: dict[tuple[str, str], dict[str, float]] = defaultdict(dict)
+    for r in records:
+        raw_by_ij[(r["item"], r["judge"])][r["contestant"]] = r["score"]
+    for item in items:
+        for ai in range(len(judges)):
+            a = judges[ai]
+            sa = raw_by_ij.get((item, a))
+            if not sa:
+                continue
+            for b in judges[ai + 1:]:
+                sb = raw_by_ij.get((item, b))
+                if not sb:
+                    continue
+                for contestant in sorted(
+                    sa.keys() & sb.keys(), key=lambda c: contestants_order[c]
+                ):
+                    scores[(a, b, item)][contestant] = (sa[contestant], sb[contestant])
+
+    def classify(va: float, vb: float, wa: float, wb: float) -> str:
+        a_tie = abs(va - wa) <= TIE_EPS
+        b_tie = abs(vb - wb) <= TIE_EPS
+        if a_tie and b_tie:
+            return DISAGREEMENT_BOTH_TIE
+        if a_tie or b_tie:
+            return DISAGREEMENT_ONE_TIE
+        a_prefers_v = va > wa
+        b_prefers_v = vb > wb
+        return (
+            DISAGREEMENT_CONCORDANT
+            if a_prefers_v == b_prefers_v
+            else DISAGREEMENT_REVERSED
+        )
+
+    pairs: list[dict[str, Any]] = []
+    for item in items:
+        for ai in range(len(judges)):
+            a = judges[ai]
+            for b in judges[ai + 1:]:
+                shared = scores.get((a, b, item))
+                if not shared:
+                    continue  # 两位评委在该项目没有任何共评选手
+                names = list(shared.keys())
+                counts = {kind: 0 for kind in DISAGREEMENT_KINDS}
+                reversed_pairs: list[dict[str, Any]] = []
+                sufficient = len(names) >= DISAGREEMENT_MIN_SHARED
+                for pi in range(len(names)):
+                    for pj in range(pi + 1, len(names)):
+                        cn, dn = names[pi], names[pj]
+                        ca, cb = shared[cn]
+                        da, db = shared[dn]
+                        kind = classify(ca, cb, da, db)
+                        counts[kind] += 1
+                        if kind == DISAGREEMENT_REVERSED:
+                            # 归一化方向：contestant_a 为 judge 更偏好的选手，
+                            # contestant_b 为 other_judge 更偏好的选手。
+                            if ca < da:  # judge a 更偏好 dn
+                                cn, dn = dn, cn
+                                ca, cb, da, db = da, db, ca, cb
+                            reversed_pairs.append(
+                                {
+                                    "contestant_a": cn,
+                                    "contestant_b": dn,
+                                    "judge": a,
+                                    "other_judge": b,
+                                    "judge_a_score": ca,
+                                    "judge_b_score": da,
+                                    "other_a_score": cb,
+                                    "other_b_score": db,
+                                }
+                            )
+                comparable = counts[DISAGREEMENT_CONCORDANT] + counts[DISAGREEMENT_REVERSED]
+                pairs.append(
+                    {
+                        "item": item,
+                        "judge": a,
+                        "other_judge": b,
+                        "shared_count": len(names),
+                        "sufficient_sample": sufficient,
+                        "counts": counts,
+                        "comparable_pairs": comparable if sufficient else None,
+                        "reversal_rate": (
+                            counts[DISAGREEMENT_REVERSED] / comparable
+                            if sufficient and comparable > 0
+                            else None
+                        ),
+                        "reversed_pairs": reversed_pairs if sufficient else [],
+                    }
+                )
+
+    total_pairs = len(pairs)
+    summary_counts = {
+        kind: sum(p["counts"][kind] for p in pairs) for kind in DISAGREEMENT_KINDS
+    }
+    rated = [p for p in pairs if p["sufficient_sample"]]
+    total_comparable = sum(p["comparable_pairs"] for p in rated)
+    total_reversed = summary_counts[DISAGREEMENT_REVERSED]
+    return {
+        "kind_labels": dict(DISAGREEMENT_KIND_LABELS),
+        "min_shared": DISAGREEMENT_MIN_SHARED,
+        "summary": {
+            "pair_rows": total_pairs,
+            "rated_pairs": len(rated),
+            "insufficient_pairs": total_pairs - len(rated),
+            "counts": summary_counts,
+            "comparable_pairs": total_comparable,
+            "reversed_pairs": total_reversed,
+            "reversal_rate": (
+                total_reversed / total_comparable if total_comparable > 0 else None
+            ),
+        },
+        "pairs": pairs,
+    }
 
 
 def analyze(
@@ -243,6 +403,8 @@ def analyze(
         "groups": groups,
         "contestants": contestant_blocks,
         "reversals": reversals,
+        # 评委排序分歧只基于原始分，与校准范围、人工裁决无关，但随导入/合并实时刷新。
+        "judge_disagreement": judge_disagreement(records),
         "counts": {
             "scores": len(records),
             "contestants": len(contestants),

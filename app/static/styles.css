@@ -420,3 +420,27 @@ tr.mg-row.unchanged:hover td { background: #fafbff; }
 .merge-actions { margin-top: 12px; }
 .merge-actions .btn-ghost-card { color: var(--muted); }
 .merge-actions .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ---------- Judge ranking disagreement panel ---------- */
+.dg-concordant { color: var(--green); }
+.dg-reversed, .dg-reversed-strong { color: var(--red); }
+.dg-reversed-strong b { font-size: 15px; }
+.dg-one-tie { color: var(--amber); }
+.dg-both-tie { color: var(--muted); }
+tr.dg-insufficient-row td { background: #f7f8fb; }
+.dg-insufficient { color: var(--muted); font-size: 13px; }
+tr.dg-detail-row > td { padding: 0 12px 10px; background: #fbfcfe; border-top: none; }
+.dg-details summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 12.5px;
+  padding: 4px 0;
+  user-select: none;
+}
+.dg-details summary:hover { text-decoration: underline; }
+.dg-table-wrap { margin: 6px 0 4px; }
+.dg-table-wrap table { font-size: 13px; }
+tr.dg-rev-row td { background: #fff; }
+.dg-vs { color: var(--muted); margin: 0 8px; font-weight: 700; }
+.dg-fav { font-weight: 600; }
+.dg-note { display: block; color: var(--muted); font-size: 12px; }

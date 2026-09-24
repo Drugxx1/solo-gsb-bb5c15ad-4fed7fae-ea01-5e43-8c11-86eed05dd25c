@@ -95,6 +95,7 @@ function render() {
   initRuleDraft();
   renderDetails();
   renderStability();
+  renderDisagreement();
   refreshCompare();
 }
 
@@ -367,6 +368,133 @@ function renderCompare() {
     totalsTable +
     `<h3 class="sub">逐项目对比（项目内各评委打分的均值）</h3>` +
     `<div class="table-wrap compare-table-wrap"><table>${head}${rows}</table></div>`;
+}
+
+// ---------- Judge ranking disagreement ----------
+// 展开状态按「项目|评委|评委」记忆，整表重渲染（裁决等触发）后保持展开。
+const disagreementOpen = new Set();
+
+function pctText(rate) {
+  if (rate === null || rate === undefined) return "—";
+  return (rate * 100).toFixed(1) + "%";
+}
+
+function renderDisagreement() {
+  const panel = $("#disagreement-panel");
+  if (!panel) return;
+  if (!analysis || analysis.counts.scores === 0) {
+    panel.innerHTML = "";
+    return;
+  }
+  const dg = analysis.judge_disagreement;
+  const labels = dg.kind_labels;
+  const s = dg.summary;
+
+  if (s.pair_rows === 0) {
+    panel.innerHTML = `<p class="no-reversal">当前数据中没有任何两位评委在同一项目共评过选手，无法计算排序分歧。</p>`;
+    return;
+  }
+
+  const banner = `
+    <div class="compare-banner">
+      共 <b>${s.pair_rows}</b> 个「项目 × 评委对」组合：
+      <b>${s.rated_pairs}</b> 个样本充足、<b>${s.insufficient_pairs}</b> 个样本不足（共评选手少于 ${dg.min_shared} 名，不给分歧率）。
+      全部选手对中：同向 <b class="dg-concordant">${s.counts.concordant}</b>、
+      逆向 <b class="dg-reversed">${s.counts.reversed}</b>、
+      单方同分 <b class="dg-one-tie">${s.counts.one_tie}</b>、
+      双方同分 <b class="dg-both-tie">${s.counts.both_tie}</b>。
+      可比较对（双方均非同分）<b>${s.comparable_pairs}</b>，
+      整体逆向占比 <b class="${s.reversed_pairs > 0 ? "dg-reversed" : "dg-concordant"}">${pctText(s.reversal_rate)}</b>
+      <span class="compare-note">（= 逆向 ${s.reversed_pairs} ÷ 可比 ${s.comparable_pairs}；同分对不计入分母）。本面板只基于原始分，与校准范围及裁决无关。</span>
+    </div>`;
+
+  const head = `
+    <tr>
+      <th>项目</th><th>评委 A</th><th>评委 B</th><th class="num">共评<br>选手数</th>
+      <th class="num">同向</th><th class="num">逆向</th>
+      <th class="num">单方<br>同分</th><th class="num">双方<br>同分</th>
+      <th class="num">可比较<br>对数</th><th class="num">逆向占比</th>
+    </tr>`;
+
+  const rows = dg.pairs.map((p) => {
+    const key = `${p.item}|${p.judge}|${p.other_judge}`;
+    const c = p.counts;
+    if (!p.sufficient_sample) {
+      return `
+      <tr class="dg-insufficient-row">
+        <td>${esc(p.item)}</td><td>${esc(p.judge)}</td><td>${esc(p.other_judge)}</td>
+        <td class="num">${p.shared_count}</td>
+        <td colspan="6" class="dg-insufficient">样本不足（共评选手少于 ${dg.min_shared} 名，无法枚举选手对），不给分歧率</td>
+      </tr>`;
+    }
+    const rateCls = c.reversed > 0 ? "dg-reversed" : "dg-concordant";
+    const detailHead = `
+      <tr>
+        <th>逆向选手对（前者由 ${esc(p.judge)} 偏好，后者由 ${esc(p.other_judge)} 偏好）</th>
+        <th class="num">${esc(p.judge)}<br>给前者</th>
+        <th class="num">${esc(p.other_judge)}<br>给前者</th>
+        <th class="num">${esc(p.judge)}<br>给后者</th>
+        <th class="num">${esc(p.other_judge)}<br>给后者</th>
+      </tr>`;
+    const detailRows = p.reversed_pairs.map((rp) => `
+      <tr class="dg-rev-row">
+        <td>
+          <span class="dg-fav">${esc(rp.contestant_a)}</span>
+          <span class="dg-vs">↔</span>
+          <span class="dg-fav">${esc(rp.contestant_b)}</span>
+          <small class="dg-note">${esc(p.judge)} 偏好前者，${esc(p.other_judge)} 偏好后者</small>
+        </td>
+        <td class="num"><b>${fmt(rp.judge_a_score)}</b></td>
+        <td class="num"><b>${fmt(rp.other_a_score)}</b></td>
+        <td class="num"><b>${fmt(rp.judge_b_score)}</b></td>
+        <td class="num"><b>${fmt(rp.other_b_score)}</b></td>
+      </tr>`).join("");
+    const detail = `
+      <details class="dg-details" data-key="${esc(key)}" ${disagreementOpen.has(key) ? "open" : ""}>
+        <summary>
+          逆向选手对 <b class="dg-reversed">${c.reversed}</b> 个
+          （点击查看双方原始分${c.reversed === 0 ? "；本评委对在该项目无逆向选手对" : ""}）
+        </summary>
+        <div class="table-wrap dg-table-wrap">
+          <table>
+            ${detailHead}
+            ${detailRows || '<tr><td colspan="5" class="no-reversal">✓ 没有逆向选手对。</td></tr>'}
+          </table>
+        </div>
+      </details>`;
+    return `
+      <tr>
+        <td>${esc(p.item)}</td><td>${esc(p.judge)}</td><td>${esc(p.other_judge)}</td>
+        <td class="num"><b>${p.shared_count}</b></td>
+        <td class="num dg-concordant">${c.concordant}</td>
+        <td class="num${c.reversed > 0 ? " dg-reversed-strong" : ""}"><b>${c.reversed}</b></td>
+        <td class="num dg-one-tie">${c.one_tie}</td>
+        <td class="num dg-both-tie">${c.both_tie}</td>
+        <td class="num">${p.comparable_pairs}</td>
+        <td class="num"><b class="${rateCls}">${pctText(p.reversal_rate)}</b></td>
+      </tr>
+      <tr class="dg-detail-row"><td colspan="10">${detail}</td></tr>`;
+  }).join("");
+
+  panel.innerHTML = banner + `
+    <div class="table-wrap">
+      <table>
+        ${head}
+        ${rows}
+      </table>
+    </div>
+    <p class="hint" style="margin-bottom:0;">
+      分类口径：两位评委给两名共评选手的原始分——偏好一致为「${labels.concordant}」，偏好相反为「${labels.reversed}」，
+      仅一方给两人同分为「${labels.one_tie}」，两方都给两人同分为「${labels.both_tie}」；
+      仅「同向 / 逆向」（双方均非同分）计入可比较对数与逆向占比。
+    </p>`;
+
+  panel.querySelectorAll(".dg-details").forEach((el) => {
+    el.addEventListener("toggle", () => {
+      if (el.open) disagreementOpen.add(el.dataset.key);
+      else disagreementOpen.delete(el.dataset.key);
+    });
+  });
 }
 
 compareASel.addEventListener("change", refreshCompare);
